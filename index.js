@@ -171,6 +171,8 @@
 			
 			super();
 
+			this.root = root;
+
 			this.statusList = statuses;
 			this.mime = mime;
 
@@ -193,7 +195,7 @@
 			});
 
 			this.on('get', function (request, response) {
-				new FileSender(response, path.join(root, request.url)).sendFile();
+				new FileSender(response, path.join(this.root, request.url)).sendFile();
 			});
 
 			this.up = function () {
