@@ -167,7 +167,7 @@
 	}
 
 	class Server extends http.Server {
-		constructor (port) {
+		constructor (port, root) {
 			
 			super();
 
@@ -193,7 +193,7 @@
 			});
 
 			this.on('get', function (request, response) {
-				new FileSender(response, path.join(__dirname, request.url)).sendFile();
+				new FileSender(response, path.join(root, request.url)).sendFile();
 			});
 
 			this.up = function () {
