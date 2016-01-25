@@ -14,9 +14,10 @@
 	const rndstr = require('./lib/rndstr.js');
 	const statuses = utils.joiny(http.STATUS_CODES, require('./lib/status.js'));
 
-	class Responser {
+	class Responser extends EventEmitter{
 		constructor (response) {
-			
+			super();
+
 			this.statusList = statuses;
 			this.mime = mime;
 
@@ -35,7 +36,7 @@
 			this.setMime = function (mime) {
 				if (mime.substr(0, 1) !== '.')
 					mime = '.' + mime;
-				var headers = this.mime[mime] || this.mime['.txt'];
+				const headers = this.mime[mime] || this.mime['.txt'];
 				for (var key in headers)
 					this.response.setHeader(key, headers[key]);
 				return this;
@@ -51,63 +52,18 @@
 		}
 	}
 
-	class FileSender extends Responser {
-		constructor (response, filePath) {
-			super(response);
-
-			this.path = filePath;
-			this.defaultFile = 'index.html';
-			
-			this.sendFile = function () {
-				const self = this;
-				function _send(fd, pos) {
-					const size = 1024;
-
-					fs.read(fd, new Buffer(size), 0, size, pos, function (err, bytesRead, buffer) {
-						if (err)
-							self.response.end();
-						else
-							self.response.write(buffer, function () {
-								if (bytesRead < size)
-									self.response.end();
-								else
-									_send.call(self, fd, pos + bytesRead);
-							});
-					});
-				}
-
-				fs.stat(this.path, function (err, stats) {
-					if (err) {
-						self.sendError(404, 'File ' + path.basename(self.path) + ' not found.');
-					} else if (stats.isFile()) {
-						self.setStatus(200).setMime(path.extname(self.path));
-						fs.open(self.path, 'r', function (err, fd) {
-							if (err) {
-								self.sendError(520, err.Error);
-							} else {
-								self.response.setHeader('Content-length', stats.size);
-								self.response.setHeader('Last-Modified', stats.mtime.toUTCString());
-								_send.call(self, fd, 0);
-							}
-						});
-					} else if (stats.isDirectory()) {
-						self.path = path.normalize(path.join(self.path, self.defaultFile));
-						self.sendFile();
-					} else {
-						self.sendError(404, 'Incorrect path');
-					}
-				});
-			};
-		}
-	};
-
 	class Job extends Responser {
-		constructor (response, name) {
+		constructor (response, name, server) {
 			super(response);
 
 			this.name = name;
 
-			this.cmd = '';
+			this.server = server;
+
+			this.setResponse = function (response) {
+				this.response = response;
+				return this;
+			}
 
 			this.sendString = function (str, code, msg) {
 				this.setStatus(code || 200, msg);
@@ -117,52 +73,11 @@
 				return this;
 			}
 
-			this.performTask = function (args, opts) {
-				return spawn('scanimage', args, opts);
-			}
-
-			this.findScanners = function () {
-				var data = '';
-				const scan = this.performTask(['-f %i\t%d\t%v\t%m\t%n']);
-				const self = this;
-
-				scan.stdout.on('data', function (chunk) {data += chunk;});
-				scan.stdout.on('end', function () {
-					data = data.split('\n');
-					var list = [];
-					for (var i = 0, l = data.length; i < l; ++i) {
-						var raw = data[i];
-						if (!raw)
-							continue;
-						raw = raw.trim().split('\t');
-						list.push({
-							i: +raw[0],
-							name: raw[1],
-							description: [raw[2], raw[3]].join(' ')
-						});
-					}
-					list.sort(function (a, b) {return a.i - b.i});
-					self.setStatus(200).setMime('json').response.end(JSON.stringify(list));
-				});
-				scan.stderr.on('data', function () {self.sendError(520);});
-			}
-		}
-	}
-
-	class Jobber extends EventEmitter {
-		constructor () {
-			super();
-
-			this.inJobs = {};
-
-			this.updateJob = function (jobName, response) {
-				var job = this[jobName];
-				if (!job)
-					new Responser(response).sendError(401, 'Conection not initialized');
-				else
-					job.setResponse(response);
-				return job;
-			}
+			this.on('stop', () => {
+				const str = 'job ' + this.name + ' finished.';
+				this.sendString(str, 200, str);
+				delete this.server.job[this.name];
+			});
 		}
 	}
 
@@ -178,24 +93,131 @@
 
 			this.jobs = {};
 
-			this.on('initJob', function (response) {
+			Object.defineProperties(this.jobs, {
+				events: {
+					value: {
+						on: {},
+						once: {}
+					},
+					enumerable: false;
+				},
+				on: {
+					value: ('type', handler) => {
+						var on = this.events.on;
+						if (on[type])
+							on[type].push(handler);
+						else
+							on[type] = [handler];
+						for (var key in jobs)
+							jobs[key].on(type, handler);
+						return this;
+					},
+					enumerable: false;
+				},
+				once: {
+					value: ('type', handler) => {
+						var once = this.events.once;
+						if (once[type])
+							once[type].push(handler);
+						else
+							once[type] = [handler];
+						for (var key in jobs)
+							jobs[key].once(type, handler);
+						return this;
+					},
+					enumerable: false;
+				}
+			});
+
+			this.sendFile = function (file, mime) {
+				const self = this;
+				function _send(fd, pos) {
+					const size = 1024;
+
+					fs.read(fd, new Buffer(size), 0, size, pos, (err, bytesRead, buffer) => {
+						if (err)
+							self.response.end();
+						else
+							self.response.write(buffer, () => {
+								if (bytesRead < size)
+									self.response.end();
+								else
+									_send.call(self, fd, pos + bytesRead);
+							});
+					});
+				}
+
+				fs.stat(file, (err, stats) => {
+					if (err) {
+						self.sendError(404, 'File ' + path.basename(self.path) + ' not found.');
+					} else if (stats.isFile()) {
+						self.setStatus(200).setMime(mime || path.extname(self.path));
+						fs.open(self.path, 'r', (err, fd) => {
+							if (err) {
+								self.sendError(520, err.Error);
+							} else {
+								self.response.setHeader('Content-length', stats.size);
+								self.response.setHeader('Last-Modified', stats.mtime.toUTCString());
+								_send.call(self, fd, 0);
+							}
+						});
+					} else if (stats.isDirectory()) {
+						self.sendFile(path.normalize(path.join(file, self.defaultFile, mime)));
+						self.sendFile();
+					} else {
+						self.sendError(404, 'Incorrect path');
+					}
+				});
+				return this;
+			};
+
+			this.on('initJob', (response) => {
 				var name = md5(new Date().getTime().toString(36));
+				
+				function _setEvents (job, type) {
+					const set = this.jobs.events[type];
+
+					for (var key in set) {
+						var list = set[key];
+						for (var i = 0, l = list.length; i < l; ++i)
+							job[type](key, list[i]);
+					}
+				}
+
 				while (this[name])
 					name = md5(name + rndstr(10));
 				this.jobs[name] = new Job(response, name);
+
+				_setEvents.call(this, this.jobs[name], 'once');
+				_setEvents.call(this, this.jobs[name], 'on');				
+
 				this.jobs[name].sendString(name, 201, 'Conection initialized');
 			});
 
-			this.on('stopJob', function (job) {
-				delete this.jobs[job];
-			});
-
-			this.on('request', function (request, response) {
+			this.on('request', (request, response) => {
 				this.emit(request.method.toLowerCase(), request, response);
 			});
 
-			this.on('get', function (request, response) {
-				new FileSender(response, path.join(this.root, request.url)).sendFile();
+			this.on('get', (request, response) => {
+				this.sendFile(path.join(this.root, request.url));
+			});
+
+			this.on('pop', (request, response) => {
+				if (!request.url) {
+					this.emit('initJob', response);
+				} else {
+					var data = [];
+					request.on('data', (chunk) => {data.push(chunk);});
+					request.on('end', () => {
+						try {
+							this.jobs[request.url].setResponse(response).emit('data', request.headers['content-type'], data);
+						} catch (e) {
+							response.statusCode = 400;
+							response.statusMessage = 'Incorrect url';
+							response.end();
+						}
+					});
+				}
 			});
 
 			this.up = function () {
@@ -207,6 +229,5 @@
 	};
 
 	exports.Responser = Responser;
-	exports.FileSender = FileSender;
 	exports.Server = Server;
 })()
